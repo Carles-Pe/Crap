@@ -1,0 +1,141 @@
+class LSTMGCNConv(nn.Module):
+    """Layer comprising a convolution layer followed by LSTM and dense layers."""
+
+    def __init__(
+        self,
+        in_feat,
+        out_feat,
+        hidden_layer,
+        lstm_units: int,
+        input_seq_len: int,
+        output_seq_len: int,
+        activation,
+        activationLSTM
+    ):
+        super().__init__()
+        
+
+        self.in_feat, self.out_feat = in_feat, out_feat
+        self.input_seq_len, self.output_seq_len = input_seq_len, output_seq_len
+        self.hidden_layer, self.lstm_units = hidden_layer, lstm_units
+
+        self.linear1 = nn.Linear(input_seq_len*in_feat, hidden_layer)
+        self.activation = activation
+        self.graph_conv = GCNConv(input_seq_len*in_feat, hidden_layer, {"aggr": "mean"})
+
+        assert hidden_layer % input_seq_len == 0
+        self.lstm = nn.LSTM(input_size=2*hidden_layer//input_seq_len, hidden_size=lstm_units,batch_first=True)
+        self.activationLSTM = activationLSTM
+        self.linear2 = nn.Linear(lstm_units, output_seq_len*out_feat)
+
+        
+
+    def forward(self, inputs: torch_geo.data.Batch):
+        """Forward pass.
+
+        Args:
+            inputs: torch_geometric.data.Batch
+
+        Returns:
+            A tensor of shape `(num_nodes_batch, output_seq_len)`.
+        """
+
+        # Now there are no dimensions for the batch size
+        # inputs.x will be a tensor [num_nodes_batch, in_seq_len*in_feat]
+        # where num_nodes_batch is the result of placing multiple inputs adjacency matrix in block diagonals
+
+        neigh_repr = self.linear1(inputs.x)
+        neigh_repr = neigh_repr.view(-1, self.input_seq_len, self.hidden_layer//self.input_seq_len)
+
+        gcn_out = self.graph_conv(
+            inputs.x, inputs.edge_index
+        )  # gcn_out has shape: (num_nodes_batch, hidden_layer)
+
+        gcn_out = gcn_out.view(-1, self.input_seq_len, self.hidden_layer//self.input_seq_len)
+
+        gcn_out = torch.cat((neigh_repr, gcn_out), dim=-1)
+        gcn_out = self.activation(gcn_out)
+
+  
+        lstm_out, _ = self.lstm(
+            gcn_out
+        )  # lstm_out has shape: (num_nodes_batch, in_seq_len, lstm_units) in pytorch
+        # We discard all the intermediate outputs of the LSTM
+        lstm_out = self.activationLSTM(lstm_out)
+
+  
+        dense_output = self.linear2(
+            lstm_out[:,-1,:]
+        )  # dense_output has shape: (num_nodes_batch, output_seq_len)
+        dense_output = self.activation(dense_output)
+
+
+        return dense_output
+        
+        
+        
+        
+        
+epochs = 50
+hidden_layer = 8*train_list[0][0].shape[0]*train_list[0][0].shape[2]
+
+in_feat = train_list[0][0].shape[2]
+input_sequence_length = train_list[0][0].shape[0]
+output_sequence_length = train_list[0][1].shape[0]
+out_feat =  train_list[0][1].shape[2]
+lstm_units = 64
+
+activation = nn.Identity()
+activationLSTM = nn.Identity()
+
+model = LSTMGCNConv(
+    in_feat,
+    out_feat,
+    hidden_layer,
+    lstm_units,
+    input_sequence_length,
+    output_sequence_length,
+    activation,
+    activationLSTM
+).double()
+
+model.to(device)
+loss_function = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
+
+
+
+for epoch in range(epochs):
+    model.train()
+    losses = []
+    for i, data in enumerate(train_loader):
+
+        data = data.to(device)
+
+        # Step 1. Remember that Pytorch accumulates gradients.
+        # We need to clear them out before each instance
+        optimizer.zero_grad()
+
+        # Step 2. Forward pass
+        y = model(data)
+
+        # Step 3. Compute loss and gradients
+        loss = loss_function(y,data.y)
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    print("Finished Epoch: ", epoch)
+    print("Last loss: ", np.mean(np.array(losses), axis=0))
+
+    model.eval()
+    losses = []
+
+    for i, data in enumerate(val_loader):
+
+        data = data.to(device)
+        y = model(data)
+        loss = loss_function(y,data.y)
+        losses.append(loss.item())
+        
+    print("Validation Loss: ", np.mean(np.array(losses), axis=0))
